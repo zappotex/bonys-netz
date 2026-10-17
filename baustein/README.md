@@ -59,3 +59,11 @@ python -m pytest -q
 `tests/test_gegen_zentrale.py` spielt den kompletten Ablauf gegen eine **Test**-Zentrale
 mit echtem Headscale durch; die nötigen Umgebungsvariablen stehen oben in der Datei.
 Ohne sie wird der Test übersprungen.
+
+## Änderungen
+
+- **0.1.1** (17.10.2026): Beitrittsskript – `/etc/os-release` wird in einer Unter-Shell gelesen. Vorher
+  überschrieb dessen Variable `NAME` den Gerätenamen, sobald Tailscale erst installiert werden musste
+  (`tailscale up --hostname "Debian GNU/Linux"` → „contains invalid character ' '“). Neuer Test
+  `test_skript_installiert_und_behaelt_den_geraetenamen` führt das Skript mit falschen Programmen wirklich aus.
+- **0.1.0**: erste Fassung.
