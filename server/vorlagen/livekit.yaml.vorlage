@@ -1,0 +1,12 @@
+port: 7880
+log_level: info
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  node_ip: @@OEFFENTLICHE_IP@@
+keys:
+  @@LIVEKIT_KEY@@: @@LIVEKIT_SECRET@@
+room:
+  empty_timeout: 300
+  max_participants: 50

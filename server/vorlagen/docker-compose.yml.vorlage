@@ -1,0 +1,56 @@
+# Erzeugt von install.sh – Änderungen hier werden beim nächsten Lauf überschrieben.
+services:
+  headscale:
+    image: docker.io/headscale/headscale:@@HEADSCALE_VERSION@@
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    volumes:
+      - ./headscale/config:/etc/headscale:ro
+      - ./headscale/data:/var/lib/headscale
+    ports:
+      - "3478:3478/udp"
+    networks: [bonynet]
+
+  caddy:
+    image: docker.io/library/caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    networks: [bonynet]
+
+  livekit:
+    image: docker.io/livekit/livekit-server:@@LIVEKIT_VERSION@@
+    container_name: livekit
+    restart: unless-stopped
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./livekit/livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    networks: [bonynet]
+
+  zentrale:
+    build: ./zentrale
+    image: bonynet-zentrale:lokal
+    container_name: zentrale
+    restart: unless-stopped
+    env_file:
+      - ./livekit/zugang.env
+      - ./zentrale-geheim.env
+      - ./zentrale-oeffentlich.env
+      - ./zentrale-grenzen.env
+    volumes:
+      - ./zentrale-daten:/data
+    depends_on: [headscale, livekit]
+    networks: [bonynet]
+
+networks:
+  bonynet:

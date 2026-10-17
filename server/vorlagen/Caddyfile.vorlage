@@ -1,0 +1,11 @@
+@@VPN_DOMAIN@@ {
+    reverse_proxy headscale:8080
+}
+
+@@KURS_DOMAIN@@ {
+    reverse_proxy livekit:7880
+}
+
+@@ZENTRALE_DOMAIN@@ {
+    reverse_proxy zentrale:8000
+}

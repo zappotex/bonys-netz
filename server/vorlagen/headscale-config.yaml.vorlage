@@ -1,0 +1,57 @@
+server_url: https://@@VPN_DOMAIN@@
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  allocation: sequential
+
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "bony"
+    region_name: "Bony-Netz"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: @@OEFFENTLICHE_IP@@
+  urls: []
+  paths: []
+  auto_update_enabled: false
+
+disable_check_updates: true
+ephemeral_node_inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+
+log:
+  level: info
+
+policy:
+  mode: database
+
+dns:
+  magic_dns: true
+  base_domain: @@NETZ_DOMAIN@@
+  override_local_dns: false
+  nameservers:
+    global:
+      - 9.9.9.9
+      - 1.1.1.1
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false

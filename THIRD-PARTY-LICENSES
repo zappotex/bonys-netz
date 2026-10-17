@@ -1,0 +1,51 @@
+Bony-Netz – Lizenzen verwendeter Programme
+==========================================
+
+Bony-Netz selbst steht unter der GNU General Public License, Version 3 oder
+(nach deiner Wahl) jeder späteren Version (GPL-3.0-or-later), siehe LICENSE.
+
+Dieses Repository enthält keinen fremden Programmcode. Die folgenden Programme
+werden erst bei der Installation auf dem Server aus ihren offiziellen Quellen
+geladen und stehen unter ihren eigenen Lizenzen.
+
+
+Als Docker-Images (Docker Hub)
+------------------------------
+
+  Programm             Image                              Lizenz
+  -------------------  ---------------------------------  ------------
+  Headscale            docker.io/headscale/headscale      BSD-3-Clause
+  LiveKit Server       docker.io/livekit/livekit-server   Apache-2.0
+  Caddy                docker.io/library/caddy            Apache-2.0
+  Python (Grundlage    docker.io/library/python           PSF-2.0, dazu Debian-Pakete
+   der Zentrale)        (3.13-slim)                       unter ihren jeweiligen Lizenzen
+
+  Quellen:
+    Headscale:  https://github.com/juanfont/headscale
+    LiveKit:    https://github.com/livekit/livekit
+    Caddy:      https://github.com/caddyserver/caddy
+    Python:     https://github.com/docker-library/python
+
+
+In der Zentrale (per pip aus PyPI, siehe server/zentrale/requirements.txt)
+---------------------------------------------------------------------------
+
+  Paket                Lizenz
+  -------------------  ------------
+  FastAPI              MIT
+  Starlette            BSD-3-Clause
+  Pydantic             MIT
+  Uvicorn              BSD-3-Clause
+  HTTPX                BSD-3-Clause
+  PyJWT                MIT
+  (und deren Abhängigkeiten, z. B. anyio MIT, h11 MIT, idna BSD-3-Clause,
+   certifi MPL-2.0, sniffio MIT/Apache-2.0, typing-extensions PSF-2.0)
+
+
+Im Agent-PC (durch das Beitrittsskript des Bausteins)
+-----------------------------------------------------
+
+  Tailscale-Client     BSD-3-Clause, aus https://pkgs.tailscale.com/stable/
+
+
+Der Baustein bony_netz verwendet nur die Python-Standardbibliothek.
