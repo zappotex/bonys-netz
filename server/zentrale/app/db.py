@@ -2,7 +2,8 @@
 """SQLite-Datenbank der Zentrale.
 
 Gespeichert wird nur das Nötigste: Instanzen (ohne Namen oder E-Mail),
-Kursleiter-Codes (nur als Hash), Kurse und Kursteilnahmen.
+Kursleiter-Codes (nur als Hash), Kurse und Kursteilnahmen, das Kurspaket eines Kurses (Angaben; die Datei liegt
+daneben) und der Fortschritt darin (Lektion, geschafft / noch nicht).
 """
 
 import hashlib
@@ -51,6 +52,29 @@ CREATE TABLE IF NOT EXISTS teilnahmen (
     anzeigename     TEXT NOT NULL,
     beigetreten     INTEGER NOT NULL,
     PRIMARY KEY (kurs_id, instanz_id)
+);
+
+-- Kurspaket eines Kurses (die Datei liegt in KURSPAKET_ORDNER/<kurs_id>.bonyspaket); gelöscht beim Beenden
+CREATE TABLE IF NOT EXISTS kurspakete (
+    kurs_id         TEXT PRIMARY KEY REFERENCES kurse(id) ON DELETE CASCADE,
+    paket_id        TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    lektionen       INTEGER NOT NULL,
+    sha256          TEXT NOT NULL,
+    groesse         INTEGER NOT NULL,
+    hochgeladen     INTEGER NOT NULL
+);
+
+-- Fortschritt im Kurspaket: nur Lektion und „geschafft / noch nicht“ – keine Inhalte; gelöscht beim Beenden
+CREATE TABLE IF NOT EXISTS fortschritt (
+    kurs_id         TEXT NOT NULL,
+    instanz_id      TEXT NOT NULL,
+    lektion         INTEGER NOT NULL,
+    geschafft       INTEGER,                -- 1 geschafft, 0 noch nicht, NULL keine Prüfaufgabe / nicht geprüft
+    aktualisiert    INTEGER NOT NULL,
+    PRIMARY KEY (kurs_id, instanz_id),
+    FOREIGN KEY (kurs_id, instanz_id) REFERENCES teilnahmen(kurs_id, instanz_id) ON DELETE CASCADE
 );
 """
 

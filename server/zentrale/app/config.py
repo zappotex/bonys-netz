@@ -35,6 +35,9 @@ class Einstellungen:
         self.salz = _pflicht("ZENTRALE_SALZ")
 
         self.db_pfad = os.environ.get("DB_PFAD", "/data/zentrale.db")
+        # Kurspakete der Kurse (.bonyspaket, hochgeladen vom Kursleiter, gelöscht beim Beenden)
+        self.kurspaket_ordner = os.environ.get("KURSPAKET_ORDNER") or os.path.join(
+            os.path.dirname(self.db_pfad) or ".", "kurspakete")
 
         # Grenzen gegen Missbrauch
         self.max_instanzen_pro_ip_tag = _zahl("MAX_INSTANZEN_PRO_IP_TAG", 3)
@@ -42,6 +45,7 @@ class Einstellungen:
         self.max_aktive_kurse_pro_kursleiter = _zahl("MAX_AKTIVE_KURSE_PRO_KURSLEITER", 5)
         self.max_teilnehmer_pro_kurs = _zahl("MAX_TEILNEHMER_PRO_KURS", 49)
         self.kurscode_gueltig_tage_max = _zahl("KURSCODE_GUELTIG_TAGE_MAX", 60)
+        self.max_kurspaket_mb = _zahl("MAX_KURSPAKET_MB", 25)
 
         # Laufzeiten
         self.geraeteschluessel_minuten = _zahl("GERAETESCHLUESSEL_MINUTEN", 60)

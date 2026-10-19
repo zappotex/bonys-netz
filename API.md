@@ -48,6 +48,8 @@ Nur für freigeschaltete Instanzen, sonst `403`.
 | GET | `/kurse/geleitet?alle=false` | Liste eigener Kurse mit Teilnehmern |
 | POST | `/kurse/{kurs_id}/status` | Body `{status}`: `laeuft`, `pausiert` oder `beendet` |
 | DELETE | `/kurse/{kurs_id}/teilnehmer/{instanz_id}` | `204` – Teilnehmer entfernen |
+| PUT | `/kurse/{kurs_id}/kurspaket?paket_id=…&name=…&version=…&lektionen=…` | Rumpf: die `.bonyspaket`-Datei (`application/octet-stream`, ZIP, höchstens `MAX_KURSPAKET_MB`, Standard 25) → Kurs. Ersetzt ein vorhandenes Kurspaket; bei anderer `paket_id` verfällt der Fortschritt. `413` zu groß, `400` kein ZIP, `409` Kurs beendet |
+| DELETE | `/kurse/{kurs_id}/kurspaket` | `204` – Kurspaket samt Fortschritt entfernen |
 
 Ein Kurs-Objekt:
 
@@ -56,12 +58,21 @@ Ein Kurs-Objekt:
   "kurs_id": "k3f9a...", "name": "Einführung Hermes", "kursleiter_name": "Bony",
   "status": "laeuft", "raum": "k3f9a...", "code": "K7QX-M3PA",
   "code_gueltig_bis": 1761000000, "erstellt": 1760000000,
+  "kurspaket": {"paket_id": "einfuehrung-hermes-agent", "name": "Einführung in Hermes Agent",
+                "version": "1.0.0", "lektionen": 9, "sha256": "…", "groesse": 30000,
+                "hochgeladen": 1760000050},
   "teilnehmer": [
     {"instanz_id": "i8c2...", "anzeigename": "Anna", "geraet_name": "agent-1",
-     "geraet_ip": "100.64.0.7", "beigetreten": 1760000100}
+     "geraet_ip": "100.64.0.7", "beigetreten": 1760000100,
+     "fortschritt": {"lektion": 3, "geschafft": true, "aktualisiert": 1760000900}}
   ]
 }
 ```
+
+`kurspaket` ist `null`, solange keins hochgeladen ist (steht auch in `/kurse/teilnahmen`). `fortschritt` ist `null`,
+bis der Teilnehmer etwas meldet, und immer `null`, solange der Kurs nicht läuft (offen, pausiert, beendet); `geschafft` ist `true`, `false` oder
+`null` (keine Prüfaufgabe bzw. noch nicht geprüft). Mehr speichert die Zentrale nicht – keine Inhalte aus dem
+Agent-PC. Beim Beenden des Kurses werden Datei, Angaben und Fortschritt gelöscht.
 
 `geraet_ip` ist die Adresse, über die der Kursleiter den Agenten-PC des Teilnehmers für
 die Hilfe-Funktion erreicht. **Nur solange der Kurs den Status `laeuft` hat.**
@@ -72,7 +83,9 @@ die Hilfe-Funktion erreicht. **Nur solange der Kurs den Status `laeuft` hat.**
 |---|---|---|
 | POST | `/kurse/beitreten` | Body `{code, geraet_id, anzeigename}` – Groß-/Kleinschreibung und Bindestrich egal. Erneuter Beitritt ersetzt Gerät und Namen |
 | GET | `/kurse/teilnahmen` | eigene aktive Kurse mit `mein_geraet_id`, ohne Kurscode |
-| DELETE | `/kurse/{kurs_id}/teilnahme` | `204` – Kurs verlassen |
+| DELETE | `/kurse/{kurs_id}/teilnahme` | `204` – Kurs verlassen (Fortschritt wird gelöscht) |
+| GET | `/kurse/{kurs_id}/kurspaket` | die `.bonyspaket`-Datei (auch für den Kursleiter), Kopf `X-Kurspaket-Sha256`; `404` ohne Kurspaket, `409` Kurs beendet. Die App vergleicht die Prüfsumme mit `kurspaket.sha256` und prüft das Paket vollständig, bevor sie es übernimmt |
+| POST | `/kurse/{kurs_id}/fortschritt` | Body `{lektion, geschafft?}` (Lektion ab 1, höchstens `kurspaket.lektionen`) → `204`; `409` ohne Kurspaket oder Kurs beendet |
 
 ## Kursraum
 

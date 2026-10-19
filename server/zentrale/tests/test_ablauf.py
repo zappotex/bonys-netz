@@ -4,6 +4,7 @@
 Start: cd zentrale && python -m pytest -q
 """
 
+import hashlib
 import json
 import os
 
@@ -76,6 +77,7 @@ class FalschesLiveKit(LiveKit):
 @pytest.fixture
 def umgebung(tmp_path, monkeypatch):
     monkeypatch.setenv("DB_PFAD", str(tmp_path / "z.db"))
+    monkeypatch.setattr("app.config._einstellungen", None)   # admin_main liest die Einstellungen neu
     hs, lk = FalschesHeadscale(), FalschesLiveKit()
     app = app_erstellen(Einstellungen(), hs, lk)
     with TestClient(app) as client:
@@ -217,3 +219,114 @@ def test_regeln_nach_neustart(tmp_path, monkeypatch):
     hs.regeln = None
     with TestClient(app_erstellen(Einstellungen(), hs, FalschesLiveKit())):
         assert hs.regeln is not None
+
+
+def _kurs_mit_teilnehmer(client, hs, capsys):
+    leiter = neue_instanz(client, "1.1.1.1")
+    tn = neue_instanz(client, "2.2.2.2")
+    admin_main(["kursleiter-code"])
+    code = capsys.readouterr().out.split("Code: ")[1].split()[0]
+    client.post("/api/v1/instanz/kursleiter", json={"code": code}, headers=auth(leiter["token"]))
+    r = client.post("/api/v1/kurse", json={"name": "Hermes", "kursleiter_name": "Bony"},
+                    headers=auth(leiter["token"]))
+    assert r.status_code == 201, r.text
+    kurs = r.json()
+    pc = hs.geraet_hinzufuegen(hs.benutzer["2"], "agent-1")
+    r = client.post("/api/v1/kurse/beitreten", headers=auth(tn["token"]),
+                    json={"code": kurs["code"], "geraet_id": pc, "anzeigename": "Anna"})
+    assert r.status_code == 200, r.text
+    return leiter, tn, kurs["kurs_id"]
+
+
+PAKET = b"PK\x03\x04" + b"inhalt" * 100
+ANGABEN = {"paket_id": "einfuehrung-hermes-agent", "name": "Einführung in Hermes Agent", "version": "1.0.0",
+           "lektionen": 9}
+
+
+def test_kurspaket_und_fortschritt(umgebung, capsys, tmp_path):
+    client, hs, _ = umgebung
+    leiter, tn, kid = _kurs_mit_teilnehmer(client, hs, capsys)
+    fremd = neue_instanz(client, "3.3.3.3")
+    url = f"/api/v1/kurse/{kid}/kurspaket"
+
+    # Noch kein Kurspaket
+    assert client.get("/api/v1/kurse/teilnahmen", headers=auth(tn["token"])).json()[0]["kurspaket"] is None
+    assert client.get(url, headers=auth(tn["token"])).status_code == 404
+    assert client.post(f"/api/v1/kurse/{kid}/fortschritt", json={"lektion": 1},
+                       headers=auth(tn["token"])).status_code == 409
+
+    # Hochladen nur der Kursleiter dieses Kurses, nur ZIP, mit gültigen Angaben
+    assert client.put(url, params=ANGABEN, content=PAKET, headers=auth(tn["token"])).status_code == 403
+    assert client.put(url, params=ANGABEN, content=b"kein zip", headers=auth(leiter["token"])).status_code == 400
+    assert client.put(url, params={**ANGABEN, "paket_id": "../x"}, content=PAKET,
+                      headers=auth(leiter["token"])).status_code == 422
+    r = client.put(url, params=ANGABEN, content=PAKET, headers=auth(leiter["token"]))
+    assert r.status_code == 200, r.text
+    angaben = r.json()["kurspaket"]
+    assert angaben["paket_id"] == "einfuehrung-hermes-agent" and angaben["groesse"] == len(PAKET)
+    assert angaben["sha256"] == hashlib.sha256(PAKET).hexdigest() and angaben["lektionen"] == 9
+    assert not [p for p in (tmp_path / "kurspakete").iterdir() if p.name.startswith(".")]   # kein Rest
+
+    # Teilnehmer sieht die Angaben und holt die Datei; Fremde nicht
+    assert client.get("/api/v1/kurse/teilnahmen", headers=auth(tn["token"])).json()[0]["kurspaket"] == angaben
+    r = client.get(url, headers=auth(tn["token"]))
+    assert r.status_code == 200 and r.content == PAKET
+    assert r.headers["x-kurspaket-sha256"] == angaben["sha256"]
+    assert client.get(url, headers=auth(fremd["token"])).status_code == 403
+
+    # Fortschritt: nur Teilnehmer, nur gültige Lektionen; der Kursleiter sieht ihn nur, solange der Kurs läuft
+    melden = f"/api/v1/kurse/{kid}/fortschritt"
+    assert client.post(melden, json={"lektion": 3}, headers=auth(fremd["token"])).status_code == 404
+    assert client.post(melden, json={"lektion": 10}, headers=auth(tn["token"])).status_code == 422
+    assert client.post(melden, json={"lektion": 3, "geschafft": True}, headers=auth(tn["token"])).status_code == 204
+    kurs = client.get("/api/v1/kurse/geleitet", headers=auth(leiter["token"])).json()[0]
+    assert kurs["status"] == "offen" and kurs["teilnehmer"][0]["fortschritt"] is None
+    client.post(f"/api/v1/kurse/{kid}/status", json={"status": "laeuft"}, headers=auth(leiter["token"]))
+    kurs = client.get("/api/v1/kurse/geleitet", headers=auth(leiter["token"])).json()[0]
+    assert kurs["teilnehmer"][0]["fortschritt"]["lektion"] == 3
+    assert kurs["teilnehmer"][0]["fortschritt"]["geschafft"] is True
+    client.post(melden, json={"lektion": 4}, headers=auth(tn["token"]))
+    kurs = client.get("/api/v1/kurse/geleitet", headers=auth(leiter["token"])).json()[0]
+    assert kurs["teilnehmer"][0]["fortschritt"]["geschafft"] is None
+
+    # Zu groß
+    os.environ["MAX_KURSPAKET_MB"] = "0"
+    try:
+        klein = app_erstellen(Einstellungen(), FalschesHeadscale(), FalschesLiveKit())
+        with TestClient(klein) as c2:
+            assert c2.put(url, params=ANGABEN, content=PAKET, headers=auth(leiter["token"])).status_code == 413
+    finally:
+        del os.environ["MAX_KURSPAKET_MB"]
+
+    # Anderes Paket: alter Fortschritt verfällt
+    r = client.put(url, params={**ANGABEN, "paket_id": "anderes-paket"}, content=PAKET + b"x",
+                   headers=auth(leiter["token"]))
+    assert r.json()["teilnehmer"][0]["fortschritt"] is None
+
+    # Beenden löscht Datei, Angaben und Fortschritt
+    client.post(melden, json={"lektion": 2}, headers=auth(tn["token"]))
+    client.post(f"/api/v1/kurse/{kid}/status", json={"status": "beendet"}, headers=auth(leiter["token"]))
+    assert not (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()
+    kurs = client.get("/api/v1/kurse/geleitet", params={"alle": "true"}, headers=auth(leiter["token"])).json()[0]
+    assert kurs["kurspaket"] is None and kurs["teilnehmer"][0]["fortschritt"] is None
+    assert client.post(melden, json={"lektion": 2}, headers=auth(tn["token"])).status_code == 409
+
+
+def test_kurspaket_entfernen_und_instanz_loeschen(umgebung, capsys, tmp_path):
+    client, hs, _ = umgebung
+    leiter, tn, kid = _kurs_mit_teilnehmer(client, hs, capsys)
+    url = f"/api/v1/kurse/{kid}/kurspaket"
+    client.put(url, params=ANGABEN, content=PAKET, headers=auth(leiter["token"]))
+    client.post(f"/api/v1/kurse/{kid}/fortschritt", json={"lektion": 1}, headers=auth(tn["token"]))
+    # Teilnehmer verlässt den Kurs: sein Fortschritt geht mit
+    client.delete(f"/api/v1/kurse/{kid}/teilnahme", headers=auth(tn["token"]))
+    assert client.app.state.db.eins("SELECT COUNT(*) AS n FROM fortschritt")["n"] == 0
+    assert client.delete(url, headers=auth(tn["token"])).status_code == 403
+    assert client.delete(url, headers=auth(leiter["token"])).status_code == 204
+    assert client.delete(url, headers=auth(leiter["token"])).status_code == 404
+    assert not (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()
+    # Instanz des Kursleiters löschen entfernt auch hochgeladene Dateien
+    client.put(url, params=ANGABEN, content=PAKET, headers=auth(leiter["token"]))
+    assert (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()
+    assert client.delete("/api/v1/instanz", headers=auth(leiter["token"])).status_code == 204
+    assert not (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()

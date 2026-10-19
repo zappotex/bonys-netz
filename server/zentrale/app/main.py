@@ -5,10 +5,14 @@ Alle Pfade liegen unter /api/v1. Angemeldete Aufrufe schicken das
 Instanz-Token im Kopf 'Authorization: Bearer <token>'.
 """
 
+import hashlib
 import logging
+import os
+import tempfile
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from . import VERSION
@@ -47,6 +51,17 @@ class KursStatus(BaseModel):
     status: str = Field(pattern="^(laeuft|pausiert|beendet)$")
 
 
+class Fortschritt(BaseModel):
+    lektion: int = Field(ge=1, le=100)
+    geschafft: bool | None = None
+
+
+# Wie die App die Angaben eines Kurspakets prüft (bonys_agents.kurspaket)
+PAKET_ID_MUSTER = r"^[a-z0-9][a-z0-9-]{1,58}[a-z0-9]$"
+VERSION_MUSTER = r"^[0-9]+(\.[0-9]+){0,3}$"
+ZIP_ANFANG = b"PK\x03\x04"
+
+
 # ---------------------------------------------------------------------------
 # Aufbau
 # ---------------------------------------------------------------------------
@@ -70,6 +85,7 @@ def app_erstellen(eins: Einstellungen | None = None,
         yield
 
     app = FastAPI(title=f"{eins.server_name} – Zentrale", version=VERSION, lifespan=lebenszyklus)
+    os.makedirs(eins.kurspaket_ordner, exist_ok=True)
 
     # -----------------------------------------------------------------------
     # Hilfsfunktionen
@@ -117,6 +133,36 @@ def app_erstellen(eins: Einstellungen | None = None,
             raise HTTPException(404, "Gerät nicht gefunden.")
         return geraet
 
+    def paket_datei(kurs_id_: str) -> str:
+        return os.path.join(eins.kurspaket_ordner, f"{kurs_id_}.bonyspaket")
+
+    def paket_loeschen(kurs_id_: str) -> None:
+        """Kurspaket eines Kurses samt Fortschritt entfernen (Datei und Angaben)."""
+        db.ausfuehren("DELETE FROM fortschritt WHERE kurs_id = ?", kurs_id_)
+        db.ausfuehren("DELETE FROM kurspakete WHERE kurs_id = ?", kurs_id_)
+        try:
+            os.remove(paket_datei(kurs_id_))
+        except FileNotFoundError:
+            pass
+
+    def paket_angaben(kurs_id_: str) -> dict | None:
+        p = db.eins("SELECT * FROM kurspakete WHERE kurs_id = ?", kurs_id_)
+        if p is None:
+            return None
+        return {"paket_id": p["paket_id"], "name": p["name"], "version": p["version"],
+                "lektionen": p["lektionen"], "sha256": p["sha256"], "groesse": p["groesse"],
+                "hochgeladen": p["hochgeladen"]}
+
+    def teilnehmer_oder_leiter(kurs_id_: str, instanz) -> dict:
+        k = db.eins("SELECT * FROM kurse WHERE id = ?", kurs_id_)
+        if k is None:
+            raise HTTPException(404, "Kurs nicht gefunden.")
+        if k["kursleiter"] != instanz["id"] and db.eins(
+            "SELECT 1 FROM teilnahmen WHERE kurs_id = ? AND instanz_id = ?", k["id"], instanz["id"]
+        ) is None:
+            raise HTTPException(403, "Du nimmst an diesem Kurs nicht teil.")
+        return k
+
     def kurs_ausgabe(kurs, mit_teilnehmern: bool) -> dict:
         daten = {
             "kurs_id": kurs["id"],
@@ -127,8 +173,11 @@ def app_erstellen(eins: Einstellungen | None = None,
             "code": f"{kurs['code'][:4]}-{kurs['code'][4:]}",
             "code_gueltig_bis": kurs["code_gueltig_bis"],
             "erstellt": kurs["erstellt"],
+            "kurspaket": paket_angaben(kurs["id"]),
         }
         if mit_teilnehmern:
+            # Fortschritt (Lektion, geschafft / noch nicht) sieht der Kursleiter nur, solange der Kurs läuft
+            mit_fortschritt = kurs["status"] == "laeuft"
             daten["teilnehmer"] = [
                 {
                     "instanz_id": t["instanz_id"],
@@ -136,9 +185,16 @@ def app_erstellen(eins: Einstellungen | None = None,
                     "geraet_name": t["geraet_name"],
                     "geraet_ip": t["geraet_ip"],
                     "beigetreten": t["beigetreten"],
+                    "fortschritt": {
+                        "lektion": t["lektion"],
+                        "geschafft": None if t["geschafft"] is None else bool(t["geschafft"]),
+                        "aktualisiert": t["aktualisiert"],
+                    } if mit_fortschritt and t["lektion"] is not None else None,
                 }
                 for t in db.alle(
-                    "SELECT * FROM teilnahmen WHERE kurs_id = ? ORDER BY beigetreten", kurs["id"]
+                    "SELECT t.*, f.lektion, f.geschafft, f.aktualisiert FROM teilnahmen t "
+                    "LEFT JOIN fortschritt f ON f.kurs_id = t.kurs_id AND f.instanz_id = t.instanz_id "
+                    "WHERE t.kurs_id = ? ORDER BY t.beigetreten", kurs["id"]
                 )
             ]
         return daten
@@ -146,6 +202,7 @@ def app_erstellen(eins: Einstellungen | None = None,
     def kurs_beenden(kurs) -> None:
         db.ausfuehren("UPDATE kurse SET status = 'beendet', beendet = ? WHERE id = ?", jetzt(), kurs["id"])
         lk.raum_loeschen(kurs["id"])
+        paket_loeschen(kurs["id"])
 
     # -----------------------------------------------------------------------
     # Allgemein
@@ -215,11 +272,13 @@ def app_erstellen(eins: Einstellungen | None = None,
 
     @app.delete("/api/v1/instanz", status_code=204)
     def instanz_loeschen(instanz=Depends(instanz_aus_token)):
-        """Löscht die Instanz samt Geräten, eigenen Kursen und Kursteilnahmen."""
+        """Löscht die Instanz samt Geräten, eigenen Kursen (mit Kurspaketen) und Kursteilnahmen."""
         for kurs in db.alle(
             "SELECT * FROM kurse WHERE kursleiter = ? AND status != 'beendet'", instanz["id"]
         ):
             lk.raum_loeschen(kurs["id"])
+        for kurs in db.alle("SELECT id FROM kurse WHERE kursleiter = ?", instanz["id"]):
+            paket_loeschen(kurs["id"])
         try:
             for geraet in hs.geraete(instanz["hs_user_name"]):
                 hs.geraet_loeschen(geraet["id"])
@@ -361,8 +420,101 @@ def app_erstellen(eins: Einstellungen | None = None,
         regeln_aktualisieren()
 
     # -----------------------------------------------------------------------
+    # Kurse: Kurspaket (hochladen nur der Kursleiter, holen auch die Teilnehmer)
+    # -----------------------------------------------------------------------
+
+    @app.put("/api/v1/kurse/{kurs}/kurspaket")
+    async def kurspaket_hochladen(
+        kurs: str,
+        request: Request,
+        paket_id: str = Query(pattern=PAKET_ID_MUSTER),
+        name: str = Query(min_length=1, max_length=120),
+        version: str = Query(max_length=20, pattern=VERSION_MUSTER),
+        lektionen: int = Query(default=0, ge=0, le=100),
+        instanz=Depends(nur_kursleiter),
+    ):
+        """Rumpf: die .bonyspaket-Datei (application/octet-stream). Ersetzt ein vorhandenes Kurspaket."""
+        k = eigener_kurs(kurs, instanz)
+        if k["status"] == "beendet":
+            raise HTTPException(409, "Der Kurs ist schon beendet.")
+        grenze = eins.max_kurspaket_mb * 1024 * 1024
+        zu_gross = HTTPException(413, f"Das Kurspaket ist zu groß (höchstens {eins.max_kurspaket_mb} MB).")
+        laenge = request.headers.get("content-length", "")
+        if laenge.isdigit() and int(laenge) > grenze:
+            raise zu_gross
+        pruefsumme, groesse = hashlib.sha256(), 0
+        fd, tmp = tempfile.mkstemp(dir=eins.kurspaket_ordner, prefix=".hochladen-")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                async for stueck in request.stream():
+                    groesse += len(stueck)
+                    if groesse > grenze:
+                        raise zu_gross
+                    pruefsumme.update(stueck)
+                    f.write(stueck)
+            with open(tmp, "rb") as f:
+                if f.read(len(ZIP_ANFANG)) != ZIP_ANFANG:
+                    raise HTTPException(400, "Das ist kein Kurspaket (.bonyspaket).")
+            os.replace(tmp, paket_datei(k["id"]))
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        alt = db.eins("SELECT paket_id FROM kurspakete WHERE kurs_id = ?", k["id"])
+        if alt is not None and alt["paket_id"] != paket_id:
+            db.ausfuehren("DELETE FROM fortschritt WHERE kurs_id = ?", k["id"])   # gehört zum alten Paket
+        db.ausfuehren(
+            "INSERT INTO kurspakete (kurs_id, paket_id, name, version, lektionen, sha256, groesse, hochgeladen) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(kurs_id) DO UPDATE SET paket_id = excluded.paket_id, "
+            "name = excluded.name, version = excluded.version, lektionen = excluded.lektionen, "
+            "sha256 = excluded.sha256, groesse = excluded.groesse, hochgeladen = excluded.hochgeladen",
+            k["id"], paket_id, " ".join(name.split()), version, lektionen, pruefsumme.hexdigest(), groesse, jetzt(),
+        )
+        return kurs_ausgabe(db.eins("SELECT * FROM kurse WHERE id = ?", k["id"]), mit_teilnehmern=True)
+
+    @app.delete("/api/v1/kurse/{kurs}/kurspaket", status_code=204)
+    def kurspaket_entfernen(kurs: str, instanz=Depends(nur_kursleiter)):
+        k = eigener_kurs(kurs, instanz)
+        if db.eins("SELECT 1 FROM kurspakete WHERE kurs_id = ?", k["id"]) is None:
+            raise HTTPException(404, "Dieser Kurs hat kein Kurspaket.")
+        paket_loeschen(k["id"])
+
+    @app.get("/api/v1/kurse/{kurs}/kurspaket")
+    def kurspaket_holen(kurs: str, instanz=Depends(instanz_aus_token)):
+        k = teilnehmer_oder_leiter(kurs, instanz)
+        if k["status"] == "beendet":
+            raise HTTPException(409, "Der Kurs ist schon beendet.")
+        p = db.eins("SELECT * FROM kurspakete WHERE kurs_id = ?", k["id"])
+        if p is None or not os.path.isfile(paket_datei(k["id"])):
+            raise HTTPException(404, "Dieser Kurs hat kein Kurspaket.")
+        return FileResponse(paket_datei(k["id"]), media_type="application/octet-stream",
+                            filename=f"{p['paket_id']}-{p['version']}.bonyspaket",
+                            headers={"X-Kurspaket-Sha256": p["sha256"]})
+
+    # -----------------------------------------------------------------------
     # Kurse: Teilnehmer
     # -----------------------------------------------------------------------
+
+    @app.post("/api/v1/kurse/{kurs}/fortschritt", status_code=204)
+    def fortschritt_melden(kurs: str, daten: Fortschritt, instanz=Depends(instanz_aus_token)):
+        """Nur Lektion und „geschafft / noch nicht“ – keine Inhalte aus dem Agent-PC."""
+        k = db.eins("SELECT * FROM kurse WHERE id = ?", kurs)
+        if k is None or db.eins(
+            "SELECT 1 FROM teilnahmen WHERE kurs_id = ? AND instanz_id = ?", kurs, instanz["id"]
+        ) is None:
+            raise HTTPException(404, "Du nimmst an diesem Kurs nicht teil.")
+        if k["status"] == "beendet":
+            raise HTTPException(409, "Der Kurs ist schon beendet.")
+        p = db.eins("SELECT lektionen FROM kurspakete WHERE kurs_id = ?", kurs)
+        if p is None:
+            raise HTTPException(409, "Dieser Kurs hat kein Kurspaket.")
+        if p["lektionen"] and daten.lektion > p["lektionen"]:
+            raise HTTPException(422, "Diese Lektion gibt es im Kurspaket nicht.")
+        db.ausfuehren(
+            "INSERT INTO fortschritt (kurs_id, instanz_id, lektion, geschafft, aktualisiert) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(kurs_id, instanz_id) DO UPDATE SET lektion = excluded.lektion, "
+            "geschafft = excluded.geschafft, aktualisiert = excluded.aktualisiert",
+            kurs, instanz["id"], daten.lektion, None if daten.geschafft is None else int(daten.geschafft), jetzt(),
+        )
 
     @app.post("/api/v1/kurse/beitreten")
     def kurs_beitreten(daten: KursBeitreten, instanz=Depends(instanz_aus_token)):
