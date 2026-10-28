@@ -8,5 +8,7 @@ rtc:
 keys:
   @@LIVEKIT_KEY@@: @@LIVEKIT_SECRET@@
 room:
+  # Räume legt nur die Zentrale an (Kursstart/Eintritt) und löscht sie bei Pause und Ende
+  auto_create: false
   empty_timeout: 300
   max_participants: 50

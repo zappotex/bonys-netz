@@ -2,6 +2,28 @@
 
 Alle wichtigen Änderungen am Bony-Netz.
 
+## 0.2.1 – Sicherheit und Datenschutz (Durchsicht vor 1.0)
+
+### Server (Zentrale 0.2.1)
+- **Kursleiter erreicht nur noch die Hilfe-Funktion:** Die Netzregel eines laufenden Kurses gibt nur Port 5959 der
+  gewählten Agent-PCs frei, nicht mehr alle Ports (vorher auch SSH mit Passwort).
+- **Rollen nicht mehr fälschbar:** Eintrittskarten erlauben kein `canUpdateOwnMetadata` mehr; `/eintritt` liefert
+  `kursleiter_identitaet`, an der die App den Kursleiter erkennt.
+- **Zugänge schließen zuverlässig:** Karten gelten 15 Minuten (`EINTRITTSKARTE_MINUTEN`, vorher 6 Stunden), Räume legt
+  nur die Zentrale an (`room.auto_create: false` – `install.sh` trägt es auch in vorhandene `livekit.yaml` ein), Pause
+  löscht den Raum, Entfernen und Austreten werfen sofort hinaus. Netzregeln werden nicht mehr unter der
+  Datenbanksperre gesetzt; scheitert Headscale, holt ein Abgleich alle 30 s den Stand nach (`/health` →
+  `regeln_aktuell`).
+- **Datenschutz:** kein Zugriffsprotokoll mehr (IP-Adressen standen mit Pfad im Docker-Log), Container-Protokolle aller
+  Dienste begrenzt (3 × 5 MB), IP-Hash nur noch 24 Stunden in eigener Tabelle (vorhandene Hashes werden geleert),
+  Teilnahmen werden beim Kursende gelöscht, Kurse enden 7 Tage nach Ablauf des Kurscodes von selbst, beendete Kurse
+  werden nach 30 Tagen gelöscht.
+- Keine öffentliche Schnittstellen-Doku mehr (`/docs`, `/redoc`, `/openapi.json`).
+
+### Baustein `bony_netz` 0.2.1
+- Das Instanz-Token folgt keiner Weiterleitung mehr und geht nie über unverschlüsseltes `http://` (außer an
+  `localhost`).
+
 ## 0.2.0 – Kurspakete in Kursen
 
 ### Server (Zentrale 0.2.0)

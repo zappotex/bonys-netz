@@ -91,7 +91,7 @@ die Hilfe-Funktion erreicht. **Nur solange der Kurs den Status `laeuft` hat.**
 
 | Methode | Pfad | Antwort / Hinweis |
 |---|---|---|
-| POST | `/kurse/{kurs_id}/eintritt` | `{kursraum_url, raum, eintrittskarte, rolle}` – nur bei Status `laeuft`, sonst `409` |
+| POST | `/kurse/{kurs_id}/eintritt` | `{kursraum_url, raum, eintrittskarte, rolle, kursleiter_identitaet}` – nur bei Status `laeuft`, sonst `409` |
 
 Mit `kursraum_url` und `eintrittskarte` verbindet sich die App über das LiveKit-SDK
 (z. B. `livekit-client` im eingebetteten Browserfenster).
@@ -105,13 +105,27 @@ Rechte der Eintrittskarte:
 | Chat, Handzeichen (Data-Nachrichten) | ja | ja |
 | Teilnehmer stummschalten / entfernen | ja (`roomAdmin`) | nein |
 
-Die Rolle steht zusätzlich in den Metadaten des Teilnehmers: `{"rolle": "kursleiter"}`.
+| Eigene Metadaten oder Namen ändern | nein | nein |
+
+Die Karte gilt `EINTRITTSKARTE_MINUTEN` (Standard 15) Minuten; LiveKit erneuert sie verbundenen Teilnehmern selbst,
+zum Wiederverbinden holt die App eine neue. Räume legt nur die Zentrale an (`room.auto_create: false`): beim Start
+und beim Eintritt; bei Pause und Ende löscht sie den Raum, beim Entfernen und Austreten wirft sie den Teilnehmer
+sofort hinaus.
+
+**Wer der Kursleiter ist**, erkennt die App ab 0.2.1 nur an `kursleiter_identitaet` (= Identität `sub` in seiner Karte).
+Die Metadaten `{"rolle": …}` stehen weiter in der Karte, sind aber nur Anzeige – bis 0.2.0 konnte jeder Teilnehmer
+sie selbst ändern.
 
 ## Statuswerte eines Kurses
 
 | Status | Beitritt mit Code | Netzzugang Kursleiter → Teilnehmer | Kursraum |
 |---|---|---|---|
 | `offen` | ja | nein | nein |
-| `laeuft` | ja | **ja** | ja |
-| `pausiert` | ja | nein | nein |
-| `beendet` | nein | nein | Raum wird gelöscht |
+| `laeuft` | ja | **ja – nur Port 5959 (Hilfe-Funktion)** | ja |
+| `pausiert` | ja | nein | nein (Raum wird gelöscht) |
+| `beendet` | nein | nein | Raum wird gelöscht; Teilnahmen werden gelöscht |
+
+Ein Kurs endet von selbst `KURS_SELBST_BEENDEN_TAGE` (Standard 7) Tage nach Ablauf seines Kurscodes; beendete Kurse
+werden nach `BEENDETE_KURSE_LOESCHEN_TAGE` (Standard 30) Tagen ganz gelöscht. Scheitert das Setzen der Netzregeln
+(Headscale nicht erreichbar), antwortet die Zentrale `502`; der Hintergrund-Abgleich (alle 30 s) holt es nach.
+`/health` meldet dann `regeln_aktuell: false`.

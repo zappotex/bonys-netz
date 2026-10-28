@@ -3,7 +3,8 @@
 
 Gespeichert wird nur das Nötigste: Instanzen (ohne Namen oder E-Mail),
 Kursleiter-Codes (nur als Hash), Kurse und Kursteilnahmen, das Kurspaket eines Kurses (Angaben; die Datei liegt
-daneben) und der Fortschritt darin (Lektion, geschafft / noch nicht).
+daneben) und der Fortschritt darin (Lektion, geschafft / noch nicht). Für die Grenze „Instanzen pro Tag“ ein
+Hash der IP-Adresse mit Zeit – nach 24 Stunden gelöscht.
 """
 
 import hashlib
@@ -54,6 +55,12 @@ CREATE TABLE IF NOT EXISTS teilnahmen (
     PRIMARY KEY (kurs_id, instanz_id)
 );
 
+-- Grenze „Instanzen pro Anschluss und Tag“: Hash aus Salz und IP-Adresse, nach 24 Stunden gelöscht
+CREATE TABLE IF NOT EXISTS anlegen_grenze (
+    ip_hash         TEXT NOT NULL,
+    zeit            INTEGER NOT NULL
+);
+
 -- Kurspaket eines Kurses (die Datei liegt in KURSPAKET_ORDNER/<kurs_id>.bonyspaket); gelöscht beim Beenden
 CREATE TABLE IF NOT EXISTS kurspakete (
     kurs_id         TEXT PRIMARY KEY REFERENCES kurse(id) ON DELETE CASCADE,
@@ -94,6 +101,8 @@ class Datenbank:
         self._verbindung.execute("PRAGMA foreign_keys = ON")
         self._verbindung.execute("PRAGMA journal_mode = WAL")
         self._verbindung.executescript(SCHEMA)
+        # Bis 0.2.0 stand der IP-Hash dauerhaft bei der Instanz – leeren (die Grenze nutzt anlegen_grenze).
+        self._verbindung.execute("UPDATE instanzen SET ip_hash = '' WHERE ip_hash != ''")
         # Eine Sperre für alles: Die Zentrale hat wenig Last, so bleibt es einfach und sicher.
         self.sperre = threading.RLock()
 

@@ -28,6 +28,7 @@ from app.main import app_erstellen  # noqa: E402
 class FalschesHeadscale:
     def __init__(self):
         self.benutzer, self.alle_geraete, self.regeln, self.naechste_id = {}, {}, None, 1
+        self.kaputt = False
 
     def benutzer_anlegen(self, name):
         uid = str(len(self.benutzer) + 1)
@@ -59,6 +60,8 @@ class FalschesHeadscale:
         self.alle_geraete.pop(gid)
 
     def regeln_setzen(self, regeln):
+        if self.kaputt:
+            raise HeadscaleFehler("nicht erreichbar")
         self.regeln = json.loads(regeln)
 
     def erreichbar(self):
@@ -68,10 +71,17 @@ class FalschesHeadscale:
 class FalschesLiveKit(LiveKit):
     def __init__(self):
         super().__init__("http://livekit", "lkkey", "x" * 64)
-        self.geloeschte_raeume = []
+        self.geloeschte_raeume, self.angelegte_raeume, self.entfernte = [], [], []
 
     def raum_loeschen(self, raum):
         self.geloeschte_raeume.append(raum)
+
+    def raum_anlegen(self, raum):
+        self.angelegte_raeume.append(raum)
+        return True
+
+    def teilnehmer_entfernen(self, raum, identitaet):
+        self.entfernte.append((raum, identitaet))
 
 
 @pytest.fixture
@@ -160,8 +170,11 @@ def test_gesamter_ablauf(umgebung, capsys):
     assert len(r.json()["teilnehmer"]) == 2
     zusatz = hs.regeln["acls"][1]
     assert zusatz["src"] == [f"{leiter_user}@"]
-    assert zusatz["dst"] == sorted([f"100.64.0.{tn1_pc}:*", f"100.64.0.{tn2_pc}:*"])
-    assert f"100.64.0.{tn1_pc2}:*" not in zusatz["dst"]   # nur das gewählte Gerät
+    # Nur der Hilfe-Port (x11vnc nach Zustimmung) – kein SSH, kein Fernzugriff, keine anderen Dienste
+    assert zusatz["dst"] == sorted([f"100.64.0.{tn1_pc}:5959", f"100.64.0.{tn2_pc}:5959"])
+    assert not [z for z in zusatz["dst"] if z.endswith(":*")]
+    assert not [z for z in zusatz["dst"] if z.startswith(f"100.64.0.{tn1_pc2}:")]   # nur das gewählte Gerät
+    assert lk.angelegte_raeume == [kid]
 
     # Eintrittskarten
     karte_l = client.post(f"/api/v1/kurse/{kid}/eintritt", headers=auth(leiter["token"])).json()
@@ -171,6 +184,10 @@ def test_gesamter_ablauf(umgebung, capsys):
     assert dl["video"]["roomAdmin"] and "screen_share" in dl["video"]["canPublishSources"]
     assert "roomAdmin" not in dt["video"] and "screen_share" not in dt["video"]["canPublishSources"]
     assert dt["name"] == "Anna" and dt["video"]["room"] == kid
+    # Niemand darf seine eigenen Metadaten (Rolle) ändern; die Rolle erkennt die App an der Identität
+    assert "canUpdateOwnMetadata" not in dl["video"] and "canUpdateOwnMetadata" not in dt["video"]
+    assert karte_t["kursleiter_identitaet"] == leiter["instanz_id"] == dl["sub"]
+    assert 14 * 60 <= dt["exp"] - dt["nbf"] <= 16 * 60   # kurz gültig, LiveKit erneuert sie verbundenen
     # Fremde Instanz bekommt keine Karte
     fremd = neue_instanz(client, "4.4.4.4")
     assert client.post(f"/api/v1/kurse/{kid}/eintritt", headers=auth(fremd["token"])).status_code == 403
@@ -182,16 +199,18 @@ def test_gesamter_ablauf(umgebung, capsys):
     # Kursleiter entfernt Ben
     tn2_id = tn2["instanz_id"]
     assert client.delete(f"/api/v1/kurse/{kid}/teilnehmer/{tn2_id}", headers=auth(leiter["token"])).status_code == 204
-    assert hs.regeln["acls"][1]["dst"] == [f"100.64.0.{tn1_pc}:*"]
+    assert hs.regeln["acls"][1]["dst"] == [f"100.64.0.{tn1_pc}:5959"]
+    assert lk.entfernte == [(kid, tn2_id)]   # sofort aus dem Kursraum
 
-    # Pausieren nimmt die Zusatzregel weg
+    # Pausieren nimmt die Zusatzregel weg und schließt den Raum
     client.post(f"/api/v1/kurse/{kid}/status", json={"status": "pausiert"}, headers=auth(leiter["token"]))
-    assert len(hs.regeln["acls"]) == 1
+    assert len(hs.regeln["acls"]) == 1 and lk.geloeschte_raeume == [kid]
 
-    # Beenden: Regel weg, Raum gelöscht, Code ungültig
+    # Beenden: Regel weg, Raum gelöscht, Code ungültig, Teilnahmen gelöscht
     client.post(f"/api/v1/kurse/{kid}/status", json={"status": "laeuft"}, headers=auth(leiter["token"]))
     client.post(f"/api/v1/kurse/{kid}/status", json={"status": "beendet"}, headers=auth(leiter["token"]))
-    assert len(hs.regeln["acls"]) == 1 and lk.geloeschte_raeume == [kid]
+    assert len(hs.regeln["acls"]) == 1 and lk.geloeschte_raeume == [kid, kid]
+    assert client.app.state.db.eins("SELECT COUNT(*) AS n FROM teilnahmen WHERE kurs_id = ?", kid)["n"] == 0
     r = client.post("/api/v1/kurse/beitreten", headers=auth(tn2["token"]),
                     json={"code": kcode, "geraet_id": tn2_pc, "anzeigename": "Ben"})
     assert r.status_code == 404
@@ -308,8 +327,9 @@ def test_kurspaket_und_fortschritt(umgebung, capsys, tmp_path):
     client.post(f"/api/v1/kurse/{kid}/status", json={"status": "beendet"}, headers=auth(leiter["token"]))
     assert not (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()
     kurs = client.get("/api/v1/kurse/geleitet", params={"alle": "true"}, headers=auth(leiter["token"])).json()[0]
-    assert kurs["kurspaket"] is None and kurs["teilnehmer"][0]["fortschritt"] is None
-    assert client.post(melden, json={"lektion": 2}, headers=auth(tn["token"])).status_code == 409
+    assert kurs["kurspaket"] is None and kurs["teilnehmer"] == []
+    # Die Teilnahme ist mit dem Kursende gelöscht – Meldungen werden abgewiesen
+    assert client.post(melden, json={"lektion": 2}, headers=auth(tn["token"])).status_code == 404
 
 
 def test_kurspaket_entfernen_und_instanz_loeschen(umgebung, capsys, tmp_path):
@@ -330,3 +350,56 @@ def test_kurspaket_entfernen_und_instanz_loeschen(umgebung, capsys, tmp_path):
     assert (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()
     assert client.delete("/api/v1/instanz", headers=auth(leiter["token"])).status_code == 204
     assert not (tmp_path / "kurspakete" / f"{kid}.bonyspaket").exists()
+
+
+def test_ip_adresse_nicht_dauerhaft(umgebung):
+    client, _, _ = umgebung
+    neue_instanz(client, "7.7.7.7")
+    db = client.app.state.db
+    assert db.eins("SELECT ip_hash FROM instanzen")["ip_hash"] == ""
+    assert db.eins("SELECT COUNT(*) AS n FROM anlegen_grenze")["n"] == 1
+    # Nach 24 Stunden ist der Eintrag weg – und die Grenze wieder frei
+    db.ausfuehren("UPDATE anlegen_grenze SET zeit = zeit - 86401")
+    for _ in range(3):
+        neue_instanz(client, "7.7.7.7")
+    assert db.eins("SELECT COUNT(*) AS n FROM anlegen_grenze")["n"] == 3
+
+
+def test_keine_oeffentliche_schnittstellen_doku(umgebung):
+    client, _, _ = umgebung
+    for pfad in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(pfad).status_code == 404
+
+
+def test_regeln_werden_nach_ausfall_nachgeholt(umgebung, capsys, monkeypatch):
+    client, hs, _ = umgebung
+    leiter, _, kid = _kurs_mit_teilnehmer(client, hs, capsys)
+    client.post(f"/api/v1/kurse/{kid}/status", json={"status": "laeuft"}, headers=auth(leiter["token"]))
+    assert len(hs.regeln["acls"]) == 2
+    # Headscale fällt aus: Pausieren meldet den Fehler, die alte Regel steht noch
+    hs.kaputt = True
+    r = client.post(f"/api/v1/kurse/{kid}/status", json={"status": "pausiert"}, headers=auth(leiter["token"]))
+    assert r.status_code == 502 and len(hs.regeln["acls"]) == 2
+    assert client.get("/health").json()["regeln_aktuell"] is False
+    # Headscale wieder da: der nächste Abgleich schließt den Zugang
+    hs.kaputt = False
+    client.app.state.abgleichen()   # läuft sonst alle ABGLEICH_SEKUNDEN im Hintergrund
+    assert len(hs.regeln["acls"]) == 1
+    assert client.get("/health").json()["regeln_aktuell"] is True
+
+
+def test_loeschfristen(umgebung, capsys):
+    client, hs, lk = umgebung
+    _, _, kid = _kurs_mit_teilnehmer(client, hs, capsys)
+    db = client.app.state.db
+    # Kurscode seit mehr als 7 Tagen abgelaufen: Der Kurs endet von selbst, Teilnahmen sind weg
+    db.ausfuehren("UPDATE kurse SET code_gueltig_bis = ? WHERE id = ?", 1000, kid)
+    client.app.state.aufraeumen()
+    assert db.eins("SELECT status FROM kurse WHERE id = ?", kid)["status"] == "beendet"
+    assert db.eins("SELECT COUNT(*) AS n FROM teilnahmen")["n"] == 0 and kid in lk.geloeschte_raeume
+    # Beendete Kurse verschwinden nach 30 Tagen ganz
+    client.app.state.aufraeumen()
+    assert db.eins("SELECT 1 FROM kurse WHERE id = ?", kid) is not None
+    db.ausfuehren("UPDATE kurse SET beendet = ? WHERE id = ?", 1000, kid)
+    client.app.state.aufraeumen()
+    assert db.eins("SELECT 1 FROM kurse WHERE id = ?", kid) is None

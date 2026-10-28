@@ -31,7 +31,7 @@ class Einstellungen:
         self.vpn_public_url = _pflicht("VPN_PUBLIC_URL")          # https://vpn.example.de
         self.kurs_public_url = _pflicht("KURS_PUBLIC_URL")        # wss://kurs.example.de
 
-        # Geheimnis zum Verschleiern von IP-Adressen (nur für Missbrauchsgrenzen)
+        # Geheimnis zum Verschleiern von IP-Adressen (nur für die Grenze „Instanzen pro Tag“, nach 24 h gelöscht)
         self.salz = _pflicht("ZENTRALE_SALZ")
 
         self.db_pfad = os.environ.get("DB_PFAD", "/data/zentrale.db")
@@ -49,7 +49,13 @@ class Einstellungen:
 
         # Laufzeiten
         self.geraeteschluessel_minuten = _zahl("GERAETESCHLUESSEL_MINUTEN", 60)
-        self.eintrittskarte_stunden = _zahl("EINTRITTSKARTE_STUNDEN", 6)
+        # Kurz, damit Entfernen und Pause wirken: LiveKit erneuert die Karte verbundener Teilnehmer selbst.
+        self.eintrittskarte_minuten = _zahl("EINTRITTSKARTE_MINUTEN", 15)
+
+        # Löschfristen (Tage): Kurse, deren Kurscode so lange abgelaufen ist, enden von selbst; beendete Kurse
+        # werden nach dieser Frist ganz gelöscht. Teilnahmen (Anzeigenamen, Geräte) löscht schon das Kursende.
+        self.kurs_selbst_beenden_tage = _zahl("KURS_SELBST_BEENDEN_TAGE", 7)
+        self.beendete_kurse_loeschen_tage = _zahl("BEENDETE_KURSE_LOESCHEN_TAGE", 30)
 
 
 _einstellungen: Einstellungen | None = None

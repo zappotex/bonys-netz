@@ -171,6 +171,11 @@ if [ ! -f livekit/livekit.yaml ]; then
 else
   gelb "LiveKit-Konfiguration vorhanden – bleibt unverändert"
 fi
+# Ab Zentrale 0.2.1: Räume legt nur die Zentrale an – auch in vorhandenen Konfigurationen nachtragen
+if ! grep -q '^  auto_create:' livekit/livekit.yaml; then
+  sed -i 's/^room:$/room:\n  auto_create: false/' livekit/livekit.yaml
+  gruen "LiveKit: Räume öffnet nur noch die Zentrale (auto_create: false)"
+fi
 
 # Geheimnisse der Zentrale: nur beim ersten Mal
 if [ ! -f zentrale-geheim.env ]; then

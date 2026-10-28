@@ -3,13 +3,17 @@
 
 Grundregel: Jede Instanz erreicht nur ihre eigenen Geräte.
 Zusatz pro laufendem Kurs: Die Geräte des Kursleiters erreichen genau die
-Agenten-PCs, die die Teilnehmer für diesen Kurs ausgewählt haben.
+Agenten-PCs, die die Teilnehmer für diesen Kurs ausgewählt haben – und dort nur
+den Port der Hilfe-Funktion (x11vnc, läuft nur nach Zustimmung des Teilnehmers).
+SSH, Fernzugriff und alle anderen Dienste im Agent-PC bleiben zu.
 Teilnehmer untereinander erreichen sich nicht.
 """
 
 import json
 
 from .db import Datenbank
+
+HILFE_PORT = 5959   # bonys_agents.hilfe.PORT
 
 
 def regeln_bauen(db: Datenbank) -> str:
@@ -32,7 +36,7 @@ def regeln_bauen(db: Datenbank) -> str:
     for kurs in kurse:
         ziele = sorted(
             {
-                f"{t['geraet_ip']}:*"
+                f"{t['geraet_ip']}:{HILFE_PORT}"
                 for t in db.alle("SELECT geraet_ip FROM teilnahmen WHERE kurs_id = ?", kurs["id"])
             }
         )

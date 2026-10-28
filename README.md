@@ -28,10 +28,14 @@ Die Schnittstelle zwischen beiden ist in [API.md](API.md) beschrieben.
 - **Jede Instanz bleibt für sich.** Die Agent-PCs einer Bony's-Agents-Installation erreichen nur
   einander. Andere Instanzen sind nicht nur gesperrt, sondern unsichtbar.
 - **Kurse öffnen genau eine Tür.** Solange ein Kurs läuft, erreicht der Kursleiter genau den
-  einen Agent-PC, den ein Teilnehmer für den Kurs ausgewählt hat. Teilnehmer erreichen sich
-  untereinander nie. Pausieren oder Beenden schließt die Tür sofort.
-- **Ende-zu-Ende verschlüsselt.** Die Agent-PCs verbinden sich direkt per WireGuard. Der Server
-  vermittelt nur und kann den Verkehr zwischen ihnen nicht mitlesen.
+  einen Agent-PC, den ein Teilnehmer für den Kurs ausgewählt hat – und dort nur die
+  Bildschirmfreigabe der Hilfe-Funktion (Port 5959), die erst nach Zustimmung des Teilnehmers
+  läuft. SSH und alle anderen Dienste bleiben zu. Teilnehmer erreichen sich untereinander nie.
+  Pausieren oder Beenden schließt die Tür sofort.
+- **Ende-zu-Ende verschlüsselt im Netz.** Die Agent-PCs verbinden sich direkt per WireGuard. Der
+  Server vermittelt nur und kann den Verkehr zwischen ihnen nicht mitlesen. Bild, Ton und Chat
+  im Kursraum laufen dagegen über den LiveKit-Server (auf dem Weg verschlüsselt, dort nur
+  weitergeleitet, nicht aufgezeichnet).
 - **Sparsam mit Daten.** Keine Konten, keine E-Mail-Adressen. Gespeichert wird nur, was für
   Netz und Kurse nötig ist (siehe [Datenschutz](#datenschutz)).
 
@@ -139,11 +143,18 @@ Die Datei bleibt bei Aktualisierungen erhalten.
 
 ## Datenschutz
 
-Die Zentrale speichert keine Namen, E-Mail-Adressen oder IP-Adressen von Instanzen.
-IP-Adressen werden nur als nicht umkehrbarer Hash für die Grenze „Instanzen pro Tag“
-verwendet. Gespeichert werden Kursnamen und die Anzeigenamen, die Teilnehmer beim Beitritt
-selbst angeben. Headscale kennt die Gerätenamen und Netzadressen der Agent-PCs. Chat und
-Kursraum werden nicht aufgezeichnet.
+Die Zentrale speichert keine Namen und keine E-Mail-Adressen. Sie führt **kein
+Zugriffsprotokoll** (uvicorn `--no-access-log`); die Container-Protokolle aller Dienste sind auf
+3 × 5 MB begrenzt. Für die Grenze „Instanzen pro Tag“ speichert sie einen Hash aus IP-Adresse und
+Salz – nach 24 Stunden gelöscht (mit dem Salz ließe sich eine IPv4-Adresse durch Probieren
+zurückrechnen, deshalb die kurze Frist). Gespeichert werden Kursnamen und die Anzeigenamen, die
+Teilnehmer beim Beitritt selbst angeben; Teilnahmen löscht das Kursende, beendete Kurse
+verschwinden nach 30 Tagen. Headscale kennt die Gerätenamen, Netzadressen, öffentlichen
+Endpunkte und „zuletzt online“ der Geräte. Chat und Kursraum werden nicht aufgezeichnet.
+
+Wer einen eigenen Server betreibt, ist für ihn verantwortlich (Impressum, Datenschutzerklärung,
+Auftragsverarbeitung mit dem Hoster) – bitte fachkundig prüfen lassen. Entwürfe für den Server
+von Bony's Agents: `docs/recht/bony-netz/` im Repository BonysAgents.
 
 ## Mitmachen
 

@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -60,6 +61,7 @@ class Fortschritt(BaseModel):
 PAKET_ID_MUSTER = r"^[a-z0-9][a-z0-9-]{1,58}[a-z0-9]$"
 VERSION_MUSTER = r"^[0-9]+(\.[0-9]+){0,3}$"
 ZIP_ANFANG = b"PK\x03\x04"
+ABGLEICH_SEKUNDEN = 30    # so oft prüft die Zentrale, ob die Netzregeln in Headscale aktuell sind
 
 
 # ---------------------------------------------------------------------------
@@ -74,17 +76,61 @@ def app_erstellen(eins: Einstellungen | None = None,
     hs = headscale or Headscale(eins.headscale_url, eins.headscale_api_key)
     lk = livekit or LiveKit(eins.livekit_url, eins.livekit_key, eins.livekit_secret)
 
+    # Zuletzt erfolgreich nach Headscale geschriebene Regeln. Weicht der Stand der Datenbank davon ab (Headscale war
+    # nicht erreichbar), holt der Abgleich das nach – sonst bliebe nach Pause, Ende oder Entfernen ein Zugang offen.
+    regelstand: dict = {"gesetzt": None}
+
+    def regeln_abgleichen() -> bool:
+        """Regeln aus der Datenbank nach Headscale schreiben, wenn sie sich geändert haben. True = aktuell."""
+        with db.sperre:
+            regeln = regeln_bauen(db)
+        if regeln == regelstand["gesetzt"]:
+            return True
+        try:
+            hs.regeln_setzen(regeln)
+        except HeadscaleFehler as e:
+            log.error("Netzregeln nicht gesetzt (neuer Versuch folgt): %s", e)
+            return False
+        regelstand["gesetzt"] = regeln
+        return True
+
+    def aufraeumen() -> None:
+        """Löschfristen: Kurse mit lange abgelaufenem Code beenden, beendete Kurse nach der Frist ganz löschen."""
+        frist = jetzt() - eins.kurs_selbst_beenden_tage * 86400
+        for k in db.alle("SELECT * FROM kurse WHERE status != 'beendet' AND code_gueltig_bis < ?", frist):
+            log.info("Kurs %s endet von selbst (Kurscode abgelaufen)", k["id"])
+            kurs_beenden(k)
+        db.ausfuehren("DELETE FROM kurse WHERE status = 'beendet' AND beendet < ?",
+                      jetzt() - eins.beendete_kurse_loeschen_tage * 86400)
+        db.ausfuehren("DELETE FROM anlegen_grenze WHERE zeit < ?", jetzt() - 86400)
+
+    halt = threading.Event()
+
+    def hintergrund() -> None:
+        runde = 0
+        while not halt.wait(ABGLEICH_SEKUNDEN):
+            runde += 1
+            try:
+                if runde % (3600 // ABGLEICH_SEKUNDEN) == 0:
+                    aufraeumen()
+                regeln_abgleichen()
+            except Exception:   # der Hintergrund darf nie sterben
+                log.exception("Fehler im Hintergrund-Abgleich")
+
     @asynccontextmanager
     async def lebenszyklus(_app: FastAPI):
         # Nach jedem Neustart den Stand der Regeln aus der Datenbank herstellen.
-        try:
-            hs.regeln_setzen(regeln_bauen(db))
+        aufraeumen()
+        if regeln_abgleichen():
             log.info("Netzregeln beim Start gesetzt")
-        except HeadscaleFehler as e:
-            log.error("Netzregeln beim Start nicht gesetzt: %s", e)
+        faden = threading.Thread(target=hintergrund, name="abgleich", daemon=True)
+        faden.start()
         yield
+        halt.set()
 
-    app = FastAPI(title=f"{eins.server_name} – Zentrale", version=VERSION, lifespan=lebenszyklus)
+    # Keine öffentliche Schnittstellen-Doku (/docs, /redoc, /openapi.json) – beschrieben ist sie in API.md
+    app = FastAPI(title=f"{eins.server_name} – Zentrale", version=VERSION, lifespan=lebenszyklus,
+                  docs_url=None, redoc_url=None, openapi_url=None)
     os.makedirs(eins.kurspaket_ordner, exist_ok=True)
 
     # -----------------------------------------------------------------------
@@ -92,13 +138,10 @@ def app_erstellen(eins: Einstellungen | None = None,
     # -----------------------------------------------------------------------
 
     def regeln_aktualisieren() -> None:
-        """Schreibt die aktuellen Regeln nach Headscale."""
-        with db.sperre:
-            try:
-                hs.regeln_setzen(regeln_bauen(db))
-            except HeadscaleFehler as e:
-                log.error("Regeln konnten nicht gesetzt werden: %s", e)
-                raise HTTPException(502, "Die Netzregeln konnten nicht aktualisiert werden.")
+        """Schreibt die aktuellen Regeln nach Headscale. Klappt das nicht, holt der Abgleich es nach."""
+        if not regeln_abgleichen():
+            raise HTTPException(502, "Die Netzregeln konnten nicht aktualisiert werden – die Zentrale versucht es "
+                                     "in Kürze von selbst erneut.")
 
     def client_ip(request: Request) -> str:
         # Die Zentrale ist nur über Caddy erreichbar, deshalb ist dieser Kopf vertrauenswürdig.
@@ -203,6 +246,8 @@ def app_erstellen(eins: Einstellungen | None = None,
         db.ausfuehren("UPDATE kurse SET status = 'beendet', beendet = ? WHERE id = ?", jetzt(), kurs["id"])
         lk.raum_loeschen(kurs["id"])
         paket_loeschen(kurs["id"])
+        # Teilnahmen (Anzeigenamen, Geräte, Netzadressen) braucht nach dem Ende niemand mehr
+        db.ausfuehren("DELETE FROM teilnahmen WHERE kurs_id = ?", kurs["id"])
 
     # -----------------------------------------------------------------------
     # Allgemein
@@ -210,7 +255,9 @@ def app_erstellen(eins: Einstellungen | None = None,
 
     @app.get("/health")
     def gesundheit():
-        return {"status": "ok", "headscale": hs.erreichbar()}
+        with db.sperre:
+            aktuell = regeln_bauen(db) == regelstand["gesetzt"]
+        return {"status": "ok", "headscale": hs.erreichbar(), "regeln_aktuell": aktuell}
 
     @app.get("/api/v1/info")
     def info():
@@ -236,8 +283,9 @@ def app_erstellen(eins: Einstellungen | None = None,
         ip_hash = sha256(eins.salz + client_ip(request))
         seit = jetzt() - 86400
         with db.transaktion() as v:
+            v.execute("DELETE FROM anlegen_grenze WHERE zeit <= ?", (seit,))
             anzahl = v.execute(
-                "SELECT COUNT(*) FROM instanzen WHERE ip_hash = ? AND erstellt > ?", (ip_hash, seit)
+                "SELECT COUNT(*) FROM anlegen_grenze WHERE ip_hash = ?", (ip_hash,)
             ).fetchone()[0]
             if anzahl >= eins.max_instanzen_pro_ip_tag:
                 raise HTTPException(429, "Von diesem Anschluss wurden heute schon zu viele Instanzen angelegt.")
@@ -252,9 +300,10 @@ def app_erstellen(eins: Einstellungen | None = None,
             token = zugangstoken()
             v.execute(
                 "INSERT INTO instanzen (id, hs_user_id, hs_user_name, token_hash, ip_hash, erstellt) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (neue_id, str(benutzer["id"]), benutzer["name"], sha256(token), ip_hash, jetzt()),
+                "VALUES (?, ?, ?, ?, '', ?)",
+                (neue_id, str(benutzer["id"]), benutzer["name"], sha256(token), jetzt()),
             )
+            v.execute("INSERT INTO anlegen_grenze (ip_hash, zeit) VALUES (?, ?)", (ip_hash, jetzt()))
         return {
             "instanz_id": neue_id,
             "token": token,
@@ -407,6 +456,10 @@ def app_erstellen(eins: Einstellungen | None = None,
             kurs_beenden(k)
         else:
             db.ausfuehren("UPDATE kurse SET status = ? WHERE id = ?", daten.status, k["id"])
+            if daten.status == "laeuft":
+                lk.raum_anlegen(k["id"])
+            else:
+                lk.raum_loeschen(k["id"])   # Pause: alle sofort raus, alte Karten öffnen nichts mehr
         regeln_aktualisieren()
         return kurs_ausgabe(db.eins("SELECT * FROM kurse WHERE id = ?", k["id"]), mit_teilnehmern=True)
 
@@ -417,6 +470,7 @@ def app_erstellen(eins: Einstellungen | None = None,
             "DELETE FROM teilnahmen WHERE kurs_id = ? AND instanz_id = ?", k["id"], teilnehmer
         ):
             raise HTTPException(404, "Teilnehmer nicht gefunden.")
+        lk.teilnehmer_entfernen(k["id"], teilnehmer)
         regeln_aktualisieren()
 
     # -----------------------------------------------------------------------
@@ -575,6 +629,7 @@ def app_erstellen(eins: Einstellungen | None = None,
             "DELETE FROM teilnahmen WHERE kurs_id = ? AND instanz_id = ?", kurs, instanz["id"]
         ):
             raise HTTPException(404, "Du nimmst an diesem Kurs nicht teil.")
+        lk.teilnehmer_entfernen(kurs, instanz["id"])
         regeln_aktualisieren()
 
     # -----------------------------------------------------------------------
@@ -598,21 +653,26 @@ def app_erstellen(eins: Einstellungen | None = None,
             name = teilnahme["anzeigename"]
         if k["status"] != "laeuft":
             raise HTTPException(409, "Der Kurs läuft gerade nicht.")
+        lk.raum_anlegen(k["id"])   # z. B. nach einem Neustart von LiveKit; ohne auto_create öffnet nur die Zentrale
         karte = lk.eintrittskarte(
             raum=k["id"],
             identitaet=instanz["id"],
             name=name,
             kursleiter=ist_leiter,
-            stunden=eins.eintrittskarte_stunden,
+            minuten=eins.eintrittskarte_minuten,
         )
         return {
             "kursraum_url": eins.kurs_public_url,
             "raum": k["id"],
             "eintrittskarte": karte,
             "rolle": "kursleiter" if ist_leiter else "teilnehmer",
+            # Die App erkennt den Kursleiter an dieser Identität (steht fest in seiner Karte), nie an Metadaten.
+            "kursleiter_identitaet": k["kursleiter"],
         }
 
     app.state.db = db
+    app.state.abgleichen = regeln_abgleichen   # für Tests und admin
+    app.state.aufraeumen = aufraeumen
     return app
 
 

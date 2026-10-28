@@ -14,4 +14,5 @@ RUN useradd --system --uid 10001 zentrale && mkdir -p /data && chown zentrale /d
 USER zentrale
 
 EXPOSE 8000
-CMD ["uvicorn", "app.main:_app_fuer_uvicorn", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# --no-access-log: keine Zeile je Aufruf (sonst stünden IP-Adressen mit Zeit und Pfad im Protokoll)
+CMD ["uvicorn", "app.main:_app_fuer_uvicorn", "--factory", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
